@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-50 font-sans">
+    <div id="app" class="max-w-4xl mx-auto p-4">
+        
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">📊 Marché.AI Manager</h1>
+            <span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-bold">Live</span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 mb-8">
+            <div class="bg-white p-6 rounded-xl shadow border-l-4 border-orange-500">
+                <p class="text-gray-500 text-sm uppercase">En Attente (Caution)</p>
+                <p class="text-3xl font-bold text-orange-600">{{ pendingOrders.length }}</p>
+                <p class="text-xs text-gray-400 mt-1">Potentiel: {{ formatPrice(pendingAmount) }}</p>
+            </div>
+            <div class="bg-white p-6 rounded-xl shadow border-l-4 border-green-500">
+                <p class="text-gray-500 text-sm uppercase">C.A. Validé (Livré)</p>
+                <p class="text-3xl font-bold text-green-600">{{ formatPrice(confirmedAmount) }}</p>
+                <p class="text-xs text-gray-400 mt-1">{{ confirmedOrders.length }} ventes terminées</p>
+            </div>
+        </div>
+
+        <h2 class="text-xl font-bold mb-4 text-gray-700">Dernières Commandes</h2>
+        <div class="space-y-3">
+            <div v-for="order in orders" :key="order.id" class="bg-white p-4 rounded-lg shadow-sm flex justify-between items-center">
+                <div>
+                    <p class="font-bold text-lg">{{ order.product_name }}</p>
+                    <p class="text-sm text-gray-500">
+                        <span :class="getStatusClass(order.status)" class="px-2 py-0.5 rounded text-xs mr-2">
+                            {{ order.status }}
+                        </span>
+                        {{ formatDate(order.created_at) }}
+                    </p>
+                </div>
+                <div class="text-right">
+                    <p class="font-bold text-gray-800">{{ formatPrice(order.amount) }}</p>
+                    <button class="text-xs text-blue-600 hover:underline mt-1">Voir détails</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const { createApp } = Vue
+        createApp({
+            data() { return { orders: [] } },
+            computed: {
+                pendingOrders() { return this.orders.filter(o => o.status === 'EN_ATTENTE_CAUTION') },
+                confirmedOrders() { return this.orders.filter(o => o.status === 'LIVRE_ET_PAYE') },
+                pendingAmount() { return this.pendingOrders.reduce((sum, o) => sum + o.amount, 0) },
+                confirmedAmount() { return this.confirmedOrders.reduce((sum, o) => sum + o.amount, 0) }
+            },
+            methods: {
+                async fetchOrders() {
+                    try {
+                        const res = await fetch('http://localhost:8000/orders');
+                        this.orders = await res.json();
+                    } catch (e) { console.error(e) }
+                },
+                formatPrice(p) { return new Intl.NumberFormat('fr-CI', { style: 'currency', currency: 'XOF' }).format(p) },
+                formatDate(d) { return new Date(d).toLocaleString() },
+                getStatusClass(status) {
+                    if (status === 'EN_ATTENTE_CAUTION') return 'bg-orange-100 text-orange-600';
+                    if (status === 'LIVRE_ET_PAYE') return 'bg-green-100 text-green-600';
+                    return 'bg-gray-100 text-gray-600';
+                }
+            },
+            mounted() {
+                this.fetchOrders();
+                setInterval(this.fetchOrders, 5000);
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
