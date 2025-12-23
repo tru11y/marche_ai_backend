@@ -1,28 +1,28 @@
 import os
 import json
 import requests
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List
 from dotenv import load_dotenv
 from groq import Groq
-from datetime import datetime  # <--- C'ÉTAIT L'IMPORT MANQUANT !
+from datetime import datetime
+import traceback
 
-# --- IMPORTS PROPRES (Architecture Modulaire) ---
+# --- IMPORTS PROPRES ---
 from .database import engine, get_db, Base
 from .models import ProductDB, OrderDB, MessageDB
 
-# Création automatique des tables dans PostgreSQL au démarrage
 Base.metadata.create_all(bind=engine)
 
 # --- CONFIGURATION ---
 load_dotenv()
-# Récupération des clés depuis le .env ou Docker
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "TOKEN_PAR_DEFAUT")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "ID_PAR_DEFAUT")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "METS_TA_CLE_GROQ_ICI_OU_DANS_ENV")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN") # Sera lu depuis Render
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID") # Sera lu depuis Render
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Sera lu depuis Render
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "blue_titanium")
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -43,8 +43,26 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "message": f"{product.name} ajouté !"}
 
-# --- LOGIQUE BUSINESS (LE CERVEAU) ---
+# --- FONCTIONS WHATSAPP (ENVOI) ---
+def send_whatsapp_message(to_number: str, message_text: str):
+    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": message_text}
+    }
+    try:
+        r = requests.post(url, json=data, headers=headers)
+        print(f"📤 Envoi WhatsApp ({r.status_code}): {r.text}")
+    except Exception as e:
+        print(f"❌ Erreur Envoi: {e}")
 
+# --- LOGIQUE BUSINESS ---
 def check_existing_order(phone: str, db: Session):
     return db.query(OrderDB).filter(
         OrderDB.customer_phone == phone, 
@@ -52,8 +70,7 @@ def check_existing_order(phone: str, db: Session):
     ).order_by(OrderDB.created_at.desc()).first()
 
 def create_order(json_data: dict, phone: str, db: Session):
-    if check_existing_order(phone, db):
-        return False 
+    if check_existing_order(phone, db): return False 
     try:
         new_order = OrderDB(
             customer_phone=phone,
@@ -65,10 +82,9 @@ def create_order(json_data: dict, phone: str, db: Session):
         )
         db.add(new_order)
         db.commit()
-        print(f"💰 COMMANDE EN ATTENTE : {json_data.get('product')}")
         return True
     except Exception as e:
-        print(f"❌ Erreur DB commande : {e}")
+        print(f"❌ DB Error: {e}")
         return False
 
 def validate_payment(phone: str, db: Session):
@@ -76,16 +92,14 @@ def validate_payment(phone: str, db: Session):
     if order:
         order.status = "LIVRE_ET_PAYE" 
         db.commit()
-        print(f"✅ PAIEMENT REÇU pour {order.customer_name}. Statut mis à jour.")
         return True
     return False
 
 def generate_dynamic_context(db: Session):
     products = db.query(ProductDB).filter(ProductDB.in_stock == True).all()
-    if not products: return "STOCK VIDE. Dis au client qu'on attend le réassort."
+    if not products: return "STOCK VIDE."
     txt = "STOCK DISPONIBLE :\n"
-    for p in products: 
-        txt += f"- {p.name} : {p.price} FCFA [IMAGE: {p.image_url}]\n"
+    for p in products: txt += f"- {p.name} : {p.price} FCFA [IMAGE: {p.image_url}]\n"
     return txt
 
 def get_chat_history(phone: str, db: Session, limit: int = 6):
@@ -106,20 +120,11 @@ def get_ai_response(user_message: str, phone: str, db: Session):
     TU ES UN VENDEUR EXPERT EN COTE D'IVOIRE.
     {stock_context}
     
-    TA STRATÉGIE EN 3 ÉTAPES :
-    
-    ÉTAPE 1 : CONVAINCRE
-    Si le client veut voir : JSON "SEND_PHOTO".
-    Si le client veut acheter : Demande "Nom" et "Quartier".
-    
-    ÉTAPE 2 : PRENDRE LA COMMANDE
-    Si tu as Nom + Quartier, utilise le JSON "FINAL_ORDER".
-    -> Dans ton texte, dis : "Commande notée. Pour valider l'expédition, faites le dépôt de 2000F sur le 0707000000".
-    
-    ÉTAPE 3 : VALIDER LE PAIEMENT (IMPORTANT)
-    Si le client dit "C'est fait", "J'ai payé", "Capture envoyée" ET que tu as déjà demandé le paiement avant :
-    -> UTILISE LE JSON "CONFIRM_PAYMENT".
-    -> Ne repose pas de question. Dis juste "Bien reçu, le livreur arrive."
+    TA STRATÉGIE :
+    1. CONVAINCRE: Si le client veut voir -> JSON "SEND_PHOTO".
+    2. PRENDRE LA COMMANDE: Si tu as Nom + Quartier -> JSON "FINAL_ORDER". 
+       Dis ensuite: "Commande notée. Pour valider l'expédition, faites le dépôt de 2000F sur le 0707000000".
+    3. VALIDER PAIEMENT: Si le client dit "C'est fait" -> JSON "CONFIRM_PAYMENT".
     
     FORMATS JSON :
     {{ "action": "SEND_PHOTO", "product_name": "...", "image_url": "...", "comment": "..." }}
@@ -127,13 +132,10 @@ def get_ai_response(user_message: str, phone: str, db: Session):
     {{ "action": "CONFIRM_PAYMENT" }}
     """
 
-    messages_payload = [{"role": "system", "content": system_prompt}]
-    messages_payload.extend(chat_history)
-
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=messages_payload,
+            messages=[{"role": "system", "content": system_prompt}] + chat_history,
             temperature=0.3
         )
         response_content = completion.choices[0].message.content
@@ -142,27 +144,26 @@ def get_ai_response(user_message: str, phone: str, db: Session):
             try:
                 start = response_content.find('{')
                 end = response_content.rfind('}') + 1
-                json_str = response_content[start:end]
-                data = json.loads(json_str)
+                data = json.loads(response_content[start:end])
                 
                 if data.get("action") == "SEND_PHOTO":
-                    reply = f"[BOT ENVOIE PHOTO] {data.get('comment')} (Lien: {data.get('image_url')})"
+                    reply = f"{data.get('comment')} (Photo: {data.get('image_url')})"
                     save_message(phone, "assistant", reply, db)
                     return reply
 
                 elif data.get("action") == "FINAL_ORDER":
                     if create_order(data, phone, db):
-                        reply = "✅ Commande pré-enregistrée ! Pour que le livreur démarre, veuillez faire le dépôt de 2000F sur le 0707000000 (Wave/OM). J'attends votre confirmation."
+                        reply = "✅ Commande pré-enregistrée ! Pour lancer le livreur, faites le dépôt de 2000F sur le 0707000000. J'attends votre confirmation."
                     else:
-                        reply = "Votre commande est déjà en attente du dépôt de 2000F. Dès que c'est fait, dites-le moi !"
+                        reply = "J'attends toujours le dépôt de 2000F pour la commande précédente."
                     save_message(phone, "assistant", reply, db)
                     return reply
                 
                 elif data.get("action") == "CONFIRM_PAYMENT":
                     if validate_payment(phone, db):
-                        reply = "🎉 Dépôt confirmé ! Votre commande passe en priorité. Le livreur Yango va vous appeler."
+                        reply = "🎉 Dépôt confirmé ! Le livreur arrive."
                     else:
-                        reply = "Je ne trouve pas de commande en attente pour vous. Voulez-vous commander ?"
+                        reply = "Aucune commande en attente de paiement."
                     save_message(phone, "assistant", reply, db)
                     return reply
 
@@ -176,51 +177,50 @@ def get_ai_response(user_message: str, phone: str, db: Session):
         print(f"❌ Erreur IA : {e}")
         return "Petit problème technique..."
 
-# --- API ---
-class OrderResponse(BaseModel):
-    id: int
-    product_name: str
-    amount: int
-    status: str
-    created_at: datetime
-    class Config: from_attributes = True
+# --- ROUTES ---
 
-@app.get("/orders", response_model=List[OrderResponse])
+@app.get("/orders")
 def get_orders(db: Session = Depends(get_db)):
-    return db.query(OrderDB).order_by(OrderDB.created_at.desc()).all()
-
-class TestMessage(BaseModel):
-    text: str
-    phone: str = "225_TESTEUR"
-
-@app.post("/chat/test")
-def test_chat(msg: TestMessage, db: Session = Depends(get_db)):
-    response = get_ai_response(msg.text, msg.phone, db)
-    return {"reply": response}
+    # Version simplifiée pour éviter les erreurs de type
+    orders = db.query(OrderDB).order_by(OrderDB.created_at.desc()).all()
+    return [{"product": o.product_name, "amount": o.amount, "status": o.status, "date": o.created_at} for o in orders]
 
 @app.get("/webhook")
 def verify_webhook(request: Request):
-    """
-    Facebook appelle cette route pour vérifier que le bot existe.
-    Il envoie un challenge (code secret) qu'on doit lui renvoyer.
-    """
-    # On récupère le token que tu as défini sur Render (ou par défaut)
-    VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mon_token_secret_indevinable")
-
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-
-    if mode and token:
-        if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("WEBHOOK_VERIFIED")
-            return int(challenge)
-        else:
-            raise HTTPException(status_code=403, detail="Token invalide")
-    return {"status": "error"}
-# --------------------------
-
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return int(challenge)
+    raise HTTPException(status_code=403, detail="Token invalide")
 
 @app.post("/webhook")
-async def receive_message(request: Request):
+async def receive_message(request: Request, db: Session = Depends(get_db)):
+    """La fonction VRAIMENT IMPORTANTE qui reçoit les messages WhatsApp"""
+    try:
+        data = await request.json()
+        
+        # On vérifie si c'est un message valide
+        if 'entry' in data and 'changes' in data['entry'][0]:
+            change = data['entry'][0]['changes'][0]['value']
+            
+            if 'messages' in change:
+                msg_info = change['messages'][0]
+                phone = msg_info['from'] # Le numéro du client
+                text = msg_info['text']['body'] # Le message écrit
+                
+                print(f"📩 Reçu de {phone}: {text}")
+                
+                # 1. On demande à l'IA quoi répondre
+                ai_reply = get_ai_response(text, phone, db)
+                
+                # 2. On envoie la réponse sur WhatsApp
+                send_whatsapp_message(phone, ai_reply)
+                
+                return {"status": "replied"}
+                
+    except Exception as e:
+        print(f"❌ Erreur Webhook : {e}")
+        traceback.print_exc()
+    
     return {"status": "ok"}
