@@ -198,6 +198,29 @@ def test_chat(msg: TestMessage, db: Session = Depends(get_db)):
     response = get_ai_response(msg.text, msg.phone, db)
     return {"reply": response}
 
+@app.get("/webhook")
+def verify_webhook(request: Request):
+    """
+    Facebook appelle cette route pour vérifier que le bot existe.
+    Il envoie un challenge (code secret) qu'on doit lui renvoyer.
+    """
+    # On récupère le token que tu as défini sur Render (ou par défaut)
+    VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mon_token_secret_indevinable")
+
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode and token:
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("WEBHOOK_VERIFIED")
+            return int(challenge)
+        else:
+            raise HTTPException(status_code=403, detail="Token invalide")
+    return {"status": "error"}
+# --------------------------
+
+
 @app.post("/webhook")
 async def receive_message(request: Request):
     return {"status": "ok"}
