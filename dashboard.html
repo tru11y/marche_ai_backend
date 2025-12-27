@@ -62,7 +62,7 @@
             methods: {
                 async fetchOrders() {
                     try {
-                        const res = await fetch('http://localhost:8000/orders');
+                        const res = await fetch('https://marche-ai-backend.onrender.com/orders');
                         this.orders = await res.json();
                     } catch (e) { console.error(e) }
                 },
@@ -79,6 +79,7 @@
                 setInterval(this.fetchOrders, 5000);
             }
         }).mount('#app')
+
     </script>
 </body>
 </html>

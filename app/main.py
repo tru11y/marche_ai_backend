@@ -121,12 +121,13 @@ def get_ai_response(user_message: str, phone: str, db: Session):
     {stock_context}
     
     TA STRATÉGIE :
-    1. CONVAINCRE: Si le client veut voir -> JSON "SEND_PHOTO".
-    2. PRENDRE LA COMMANDE: Si tu as Nom + Quartier -> JSON "FINAL_ORDER". 
-       Dis ensuite: "Commande notée. Pour valider l'expédition, faites le dépôt de 2000F sur le 0707000000".
-    3. VALIDER PAIEMENT: Si le client dit "C'est fait" -> JSON "CONFIRM_PAYMENT".
+    1. DISCUSSION : Si le client dit bonjour ou pose une question (prix, détails), réponds normalement par du texte (PAS DE JSON).
+    2. PHOTO : Si et SEULEMENT SI le client demande explicitement une image ("montre", "photo", "je veux voir") -> JSON "SEND_PHOTO".
+    3. COMMANDE : Si le client veut acheter, demande "Nom" et "Quartier".
+       Dès que tu as Nom + Quartier -> JSON "FINAL_ORDER".
+    4. PAIEMENT : Si le client dit "C'est fait" ou "J'ai payé" -> JSON "CONFIRM_PAYMENT".
     
-    FORMATS JSON :
+    FORMATS JSON (Uniquement pour les actions spéciales) :
     {{ "action": "SEND_PHOTO", "product_name": "...", "image_url": "...", "comment": "..." }}
     {{ "action": "FINAL_ORDER", "product": "...", "price": 0, "name": "...", "location": "..." }}
     {{ "action": "CONFIRM_PAYMENT" }}
@@ -140,6 +141,7 @@ def get_ai_response(user_message: str, phone: str, db: Session):
         )
         response_content = completion.choices[0].message.content
         
+        # Détection du JSON
         if "{" in response_content and "}" in response_content:
             try:
                 start = response_content.find('{')
@@ -170,13 +172,14 @@ def get_ai_response(user_message: str, phone: str, db: Session):
             except Exception:
                 pass
         
+        # Si pas de JSON, on renvoie le texte normal
         save_message(phone, "assistant", response_content, db)
         return response_content
 
     except Exception as e:
         print(f"❌ Erreur IA : {e}")
         return "Petit problème technique..."
-
+    
 # --- ROUTES ---
 
 @app.get("/orders")
